@@ -1,0 +1,152 @@
+# ============================================================
+# FC Cuboid Sparse MoE — training configuration
+#
+# Usage:
+#   torchrun --nproc_per_node=4 \
+#     experiments/sevir/runner/flowcast/dist_train_lightning_diffusion_moe.py \
+#     --config experiments/sevir/runner/flowcast/lightning_diffusion_moe_config.yaml \
+#     --train_vil_file    <path/to/train_vil.h5> \
+#     --train_lightning_file <path/to/train_lightning.h5> \
+#     --train_meta        <path/to/train_meta.csv> \
+#     --val_vil_file      <path/to/val_vil.h5> \
+#     --val_lightning_file   <path/to/val_lightning.h5> \
+#     --val_meta          <path/to/val_meta.csv>
+#
+# Mirrors the FC Cuboid config used in the 2026-04-17 run
+# (lightning_diffusion_cuboid_g0123_mb8), with a new moe_params block.
+# ============================================================
+
+run_params:
+  debug_mode: false
+  run_string: "lightning_diffusion_moe_cuboid_e8k2"
+
+# ── Test (matches FC Cuboid baseline) ──────────────────────
+test_params:
+  micro_batch_size: 2        # single GPU; baseline used 6 on multi-GPU
+  num_workers: 0
+  probabilistic_samples: 8   # 8 ensemble members — matches baseline
+  euler_steps: 10            # 10 ODE steps — matches baseline
+  probability_threshold: 0.2 # default threshold for CSI reporting
+
+# ── Training ────────────────────────────────────────────────
+training_params:
+  micro_batch_size: 4          # optimal for RTX 4090 24GB with precomputed latents
+  num_workers: 0          # PrecomputedDataset opens h5py in __init__; pickle incompatible with workers>0
+  num_epochs: 50             # matches FC Cuboid baseline
+  fp16: true
+  gradient_clip_val: 1.0
+  # Resume from epoch 0 checkpoint (crashed on print after save)
+  init_checkpoint: "artifacts/sevir/lightning_diffusion_moe/2026-05-08_09-05-05_lightning_diffusion_moe_cuboid_e8k2/models/best_lightning_diffusion_moe.pt"
+  resume_optimizer: true
+  resume_scheduler: true
+  resume_scaler: true
+
+# ── Optimiser ───────────────────────────────────────────────
+optimizer_params:
+  learning_rate: 2.0e-4       # matches FC Cuboid baseline
+  weight_decay: 1.0e-4
+
+# ── LR scheduler ────────────────────────────────────────────
+scheduler_params:
+  lr_cosine_min_lr_ratio: 0.01   # eta_min = lr * ratio
+
+# ── Data ────────────────────────────────────────────────────
+data_params:
+  lag_time: 13           # past 13 frames (65 min) — matches FC Cuboid baseline
+  lead_time: 12          # future 12 frames (60 min) — matches FC Cuboid baseline
+  time_spacing: 1        # take every frame (5-min resolution already in data)
+  raw_seq_len: 49        # raw frames in the HDF5 file
+  stride: 12             # matches FC Cuboid: (49-16)//12=2 extra seqs/event → 3 total
+
+# ── Flow matching ────────────────────────────────────────────
+flow_matching_params:
+  sigma: 0.01            # matches baseline default
+
+# ── Loss ────────────────────────────────────────────────────
+loss_params:
+  c_cap: 20.0            # matches FC Cuboid baseline
+
+# ── VIL autoencoder ─────────────────────────────────────────
+autoencoder_params:
+  autoencoder_config:     "D:/Aiden/FlowCast/experiments/sevir/autoencoder/autoencoder_kl_config.yaml"
+  autoencoder_checkpoint: "D:/Aiden/flowcast-test/saved_models/servir/autoencoder/early_stopping_model.pt"
+  ae_chunk_size: null     # null → use full local B*T_in per GPU
+  finetune_vil_encoder: false
+  full_encoder_finetune: false
+  encoder_lr_ratio: 0.1
+
+# ── Dataset keys ─────────────────────────────────────────────
+dataset_params:
+  vil_dataset:       "vil"
+  lightning_dataset: "lght"
+  vil_row_key:       null    # falls back to "file_row" column in meta CSV
+  lightning_row_key: null    # falls back to "file_row" column in meta CSV
+
+# ── Model ────────────────────────────────────────────────────
+model_params:
+  target_hw: [48, 48]    # spatial resolution of the latent grid
+  # The following fields are required by dist_train_lightning_diffusion.py
+  # but are not used by the MoE training script (kept for compatibility).
+  hidden_channels: 128
+  num_blocks: 6
+  dropout: 0.0
+
+  cuboid_params:
+    base_units: 128
+    scale_alpha: 1.0
+    depth: [4, 4]
+    num_heads: 4
+    attn_drop: 0.0
+    proj_drop: 0.0
+    ffn_drop: 0.0
+    downsample: 2
+    downsample_type: "patch_merge"
+    upsample_type: "upsample"
+    upsample_kernel_size: 3
+    num_global_vectors: 8
+    use_global_vector_ffn: true
+    use_global_self_attn: false
+    separate_global_qkv: false
+    global_dim_ratio: 1
+    self_pattern: "axial"
+    ffn_activation: "gelu"
+    gated_ffn: false
+    norm_layer: "layer_norm"
+    padding_type: "zeros"
+    checkpoint_level: 2         # gradient checkpointing: recompute attn+FFN on backward
+    pos_embed_type: "t+hw"
+    use_relative_pos: true
+    self_attn_use_final_proj: true
+    time_embed_channels_mult: 4
+    time_embed_use_scale_shift_norm: false
+    time_embed_dropout: 0.0
+    unet_res_connect: true
+
+# ── MoE (new) ────────────────────────────────────────────────
+moe_params:
+  num_experts: 8           # total experts per PositionwiseFFN → SparseMoEFFN
+  top_k: 2                 # tokens routed to top-k experts
+  load_balance_weight: 0.01  # λ in: loss = cfm_loss + λ * aux_loss
+  strategy: "up_all"      # which FFN layers to replace with MoE:
+                           #   "up_l0_t" — Up-path Level-0 T-axis only (4 layers, recommended)
+                           #   "up_t"    — Up-path all levels T-axis (8 layers)
+                           #   "up_all"  — Up-path all axes (24 layers)
+                           #   "all"     — both paths all axes (48 layers, ablation only)
+
+# ── Precomputed VIL latents (matches FC Cuboid baseline) ─────
+precomputed_vil_condition_params:
+  enable: true
+  train_latent_file: "D:/Aiden/servir/data/processed/paired/latents/train_latents.h5"
+  val_latent_file:   "D:/Aiden/servir/data/processed/paired/latents/val_latents.h5"
+  latent_past_dataset:        "z_vil_past"
+  latent_future_pred_dataset: "z_vil_future_pred"
+
+# ── Future VIL conditioning (FlowCast+, matches baseline) ────
+# Kept for reference / online test path; disabled during training
+# because precomputed latents are used instead.
+future_vil_condition_params:
+  enable: true
+  flowcast_config:     "D:/Aiden/FlowCast/experiments/sevir/runner/flowcast/flowcast_config.yaml"
+  flowcast_checkpoint: "D:/Aiden/flowcast-test/saved_models/servir/flowcast/early_stopping_model.pt"
+  euler_steps: 10
+  probabilistic_samples: 1

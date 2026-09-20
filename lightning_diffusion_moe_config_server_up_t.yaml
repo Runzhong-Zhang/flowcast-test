@@ -1,0 +1,130 @@
+# ============================================================
+# FC Cuboid Sparse MoE — training configuration (server version)
+# Strategy: up_t
+# ============================================================
+
+run_params:
+  debug_mode: false
+  run_string: "lightning_diffusion_moe_cuboid_e8k2_up_t"
+
+# ── Test (matches FC Cuboid baseline) ──────────────────────
+test_params:
+  micro_batch_size: 8
+  num_workers: 4
+  probabilistic_samples: 8
+  euler_steps: 10
+  probability_threshold: 0.2
+
+# ── Training ────────────────────────────────────────────────
+training_params:
+  micro_batch_size: 8
+  num_workers: 4
+  num_epochs: 50
+  fp16: true
+  gradient_clip_val: 1.0
+  init_checkpoint: null
+  resume_optimizer: false
+  resume_scheduler: false
+  resume_scaler: false
+
+# ── Optimiser ───────────────────────────────────────────────
+optimizer_params:
+  learning_rate: 2.0e-4
+  weight_decay: 1.0e-4
+
+# ── LR scheduler ────────────────────────────────────────────
+scheduler_params:
+  lr_cosine_min_lr_ratio: 0.01
+
+# ── Data ────────────────────────────────────────────────────
+data_params:
+  lag_time: 13
+  lead_time: 12
+  time_spacing: 1
+  raw_seq_len: 49
+  stride: 12
+
+# ── Flow matching ────────────────────────────────────────────
+flow_matching_params:
+  sigma: 0.01
+
+# ── Loss ────────────────────────────────────────────────────
+loss_params:
+  c_cap: 20.0
+
+# ── VIL autoencoder ─────────────────────────────────────────
+autoencoder_params:
+  autoencoder_config:     "configs/autoencoder_kl_config.yaml"
+  autoencoder_checkpoint: "saved_models/servir/autoencoder/early_stopping_model.pt"
+  ae_chunk_size: null
+  finetune_vil_encoder: false
+  full_encoder_finetune: false
+  encoder_lr_ratio: 0.1
+
+# ── Dataset keys ─────────────────────────────────────────────
+dataset_params:
+  vil_dataset:       "vil"
+  lightning_dataset: "lght"
+  vil_row_key:       null
+  lightning_row_key: null
+
+# ── Model ────────────────────────────────────────────────────
+model_params:
+  target_hw: [48, 48]
+  hidden_channels: 128
+  num_blocks: 6
+  dropout: 0.0
+
+  cuboid_params:
+    base_units: 128
+    scale_alpha: 1.0
+    depth: [4, 4]
+    num_heads: 4
+    attn_drop: 0.0
+    proj_drop: 0.0
+    ffn_drop: 0.0
+    downsample: 2
+    downsample_type: "patch_merge"
+    upsample_type: "upsample"
+    upsample_kernel_size: 3
+    num_global_vectors: 8
+    use_global_vector_ffn: true
+    use_global_self_attn: false
+    separate_global_qkv: false
+    global_dim_ratio: 1
+    self_pattern: "axial"
+    ffn_activation: "gelu"
+    gated_ffn: false
+    norm_layer: "layer_norm"
+    padding_type: "zeros"
+    checkpoint_level: 2
+    pos_embed_type: "t+hw"
+    use_relative_pos: true
+    self_attn_use_final_proj: true
+    time_embed_channels_mult: 4
+    time_embed_use_scale_shift_norm: false
+    time_embed_dropout: 0.0
+    unet_res_connect: true
+
+# ── MoE ─────────────────────────────────────────────────────
+moe_params:
+  num_experts: 8
+  top_k: 2
+  load_balance_weight: 0.01
+  strategy: "up_t"
+
+# ── Precomputed VIL latents ─────────────────────────────────
+precomputed_vil_condition_params:
+  enable: true
+  train_latent_file: "data/train_latents.h5"
+  val_latent_file:   "data/val_latents.h5"
+  latent_past_dataset:        "z_vil_past"
+  latent_future_pred_dataset: "z_vil_future_pred"
+
+# ── Future VIL conditioning (for online test path) ──────────
+future_vil_condition_params:
+  enable: true
+  flowcast_config:     "configs/flowcast_config.yaml"
+  flowcast_checkpoint: "saved_models/servir/flowcast/early_stopping_model.pt"
+  euler_steps: 10
+  probabilistic_samples: 1
