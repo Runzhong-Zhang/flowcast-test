@@ -2,7 +2,7 @@
 #PBS -N moe_test_cm_gated
 #PBS -q normal
 #PBS -l select=1:ngpus=4
-#PBS -M wang_lu@a-star.edu.sg
+#PBS -M Zhang_Runzhong@a-star.edu.sg
 #PBS -o logs/cross_modal_gated/test/pbs.log
 #PBS -e logs/cross_modal_gated/test/pbs.err
 #PBS -l walltime=12:00:00
@@ -12,7 +12,7 @@ set -e
 set -o pipefail
 
 # ====== 1) Directory ======
-WORKDIR=/home/users/astar/ares/wangl4/scratch/zihao/flowcast-test
+WORKDIR=/home/users/astar/ares/zhangrz3/scratch/flowcast-test
 LOGDIR=${WORKDIR}/logs/cross_modal_gated/test
 mkdir -p "$LOGDIR"
 LOG=${LOGDIR}/running.log
@@ -25,7 +25,7 @@ nvidia-smi -L || true
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
 
 # ====== 2) Environment ======
-ENV=/home/users/astar/ares/wangl4/scratch/zihao/.conda/envs/flowcast
+ENV=/home/users/astar/ares/zhangrz3/scratch/conda_envs/flowcast
 export PYTHONHOME=$ENV
 export PATH=$ENV/bin:$PATH
 export LD_LIBRARY_PATH=$ENV/lib:${LD_LIBRARY_PATH:-}
