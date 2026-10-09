@@ -347,6 +347,9 @@ class CrossModalSparseMoEFFN(SparseMoEFFN):
 
         # Attribute for VIL condition injection (set externally before forward)
         self._vil_cond: Optional[torch.Tensor] = None
+        # Set once per system forward; retained for checkpoint recomputation.
+        self._cmi_permutation: Optional[torch.Tensor] = None
+        self._cmi_loss_for_bp: Optional[torch.Tensor] = None
 
         self._reset_cross_modal_params()
 
@@ -376,6 +379,28 @@ class CrossModalSparseMoEFFN(SparseMoEFFN):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
+    def _routing_logits(self, flat: torch.Tensor, vil_proj: torch.Tensor) -> torch.Tensor:
+        if self.router_type == "concat":
+            return self.router(torch.cat([flat, vil_proj], dim=-1))
+        gate = torch.sigmoid(self.gate_proj(torch.cat([flat, vil_proj], dim=-1)))
+        return self.router(flat + gate * self.vil_value_proj(vil_proj))
+
+    def _conditional_routing_loss(self, flat: torch.Tensor, vil_cond: torch.Tensor) -> torch.Tensor:
+        """Negative permutation JSD: a CMI-inspired surrogate, not a CMI estimate.
+
+        Inspired by MCR's latent permutations and prediction JSD:
+        https://github.com/kkontras/MCR/blob/main/models/MCR_Model_StandAlone.py
+        Only routing parameters receive auxiliary gradients; task gradients are unchanged.
+        """
+        h = flat.detach()
+        z = self.vil_proj(vil_cond.detach())
+        log_p = F.log_softmax(self._routing_logits(h, z.reshape(h.shape[0], -1)).float(), dim=-1)
+        shuffled_z = z[self._cmi_permutation].reshape(h.shape[0], -1)
+        log_q = F.log_softmax(self._routing_logits(h, shuffled_z).float(), dim=-1)
+        log_m = torch.logaddexp(log_p, log_q) - 0.6931471805599453
+        jsd = 0.5 * (log_p.exp() * (log_p - log_m) + log_q.exp() * (log_q - log_m)).sum(dim=-1)
+        return -jsd.mean().clamp_min(0.0)
+
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         orig_shape = data.shape
         C = orig_shape[-1]
@@ -397,17 +422,12 @@ class CrossModalSparseMoEFFN(SparseMoEFFN):
                 N, self.vil_cond_dim, device=flat.device, dtype=flat.dtype
             )
 
-        if self.router_type == "concat":
-            router_input = torch.cat([flat, vil_proj], dim=-1)  # (N, C + vil_cond_dim)
-            logits = self.router(router_input)                  # (N, E)
-        elif self.router_type == "gated":
-            gate = torch.sigmoid(
-                self.gate_proj(torch.cat([flat, vil_proj], dim=-1))
-            )                                                   # (N, C)
-            value = self.vil_value_proj(vil_proj)               # (N, C)
-            router_input = flat + gate * value                  # (N, C)
-            logits = self.router(router_input)                  # (N, E)
+        logits = self._routing_logits(flat, vil_proj)
         probs  = F.softmax(logits, dim=-1)                      # (N, E)
+
+        self._cmi_loss_for_bp = None
+        if self.training and has_vil and self._cmi_permutation is not None:
+            self._cmi_loss_for_bp = self._conditional_routing_loss(flat, vil_cond)
 
         topk_w, topk_idx = torch.topk(probs, self.top_k, dim=-1)
         topk_w = topk_w / topk_w.sum(dim=-1, keepdim=True)

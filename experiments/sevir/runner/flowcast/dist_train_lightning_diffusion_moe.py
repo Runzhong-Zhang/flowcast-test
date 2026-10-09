@@ -343,6 +343,10 @@ def main():
     moe_vil_cond_dim     = int(moe_cfg.get("vil_cond_dim", 128))
     moe_router_type      = str(moe_cfg.get("cross_modal_router_type", "concat"))
     moe_shared_expert    = bool(moe_cfg.get("shared_expert", False))
+    cmi_weight           = float(moe_cfg.get("cmi_weight", 0.0))
+    cmi_warmup_epochs    = int(moe_cfg.get("cmi_warmup_epochs", 5))
+    if not 0.0 <= cmi_weight < float("inf") or cmi_warmup_epochs < 0:
+        raise ValueError("cmi_weight must be finite/nonnegative and cmi_warmup_epochs nonnegative")
 
     # ── Dataset / DataLoader ─────────────────────────────────────────────────
     if use_precomputed:
@@ -475,6 +479,7 @@ def main():
         cross_modal_routing=moe_cross_modal,
         vil_cond_dim=moe_vil_cond_dim,
         cross_modal_router_type=moe_router_type,
+        cmi_routing=cmi_weight > 0,
         moe_shared_expert=moe_shared_expert,
     ).to(device)
 
@@ -563,6 +568,8 @@ def main():
         train_cfm_meter  = 0.0
         train_aux_meter  = 0.0
         train_total_meter = 0.0
+        train_cmi_meter = 0.0
+        epoch_cmi_weight = cmi_weight * min(1.0, (epoch + 1) / max(1, cmi_warmup_epochs))
         train_count      = 0
 
         train_bar = tqdm(
@@ -603,6 +610,9 @@ def main():
                 base_sys = system.module if hasattr(system, "module") else system
                 aux_loss = base_sys.collect_moe_aux_loss()
                 loss     = cfm_loss + moe_lb_weight * aux_loss
+                if cmi_weight > 0:
+                    cmi_loss = base_sys.collect_cmi_routing_loss()
+                    loss = loss + epoch_cmi_weight * cmi_loss
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -614,6 +624,8 @@ def main():
             train_cfm_meter   += float(cfm_loss.item())  * bs
             train_aux_meter   += float(aux_loss.item())  * bs
             train_total_meter += float(loss.item())      * bs
+            if cmi_weight > 0:
+                train_cmi_meter += float(cmi_loss.detach()) * bs
             train_count       += bs
 
             if is_main:
@@ -645,6 +657,12 @@ def main():
         train_cfm   = (train_cfm_sum_t   / denom).item()
         train_aux   = (train_aux_sum_t   / denom).item()
         train_total = (train_total_sum_t / denom).item()
+        cmi_log = ""
+        if cmi_weight > 0:
+            cmi_sum = torch.tensor(train_cmi_meter, device=device)
+            if world_size > 1:
+                dist.all_reduce(cmi_sum, op=dist.ReduceOp.SUM)
+            cmi_log = f" | routing_jsd={-(cmi_sum / denom).item():.8f} | cmi_weight={epoch_cmi_weight:.4f}"
 
         # ── Validation ────────────────────────────────────────────────────────
         system.eval()
@@ -712,7 +730,7 @@ def main():
                 f"train_total={train_total:.4f} | val_cfm={val_loss_avg:.4f} | "
                 f"val_brier(proxy)={val_brier:.4f} | "
                 f"mean_layer_aux={mean_layer_aux:.4f} | "
-                f"n_moe_layers={len(moe_stats)}"
+                f"n_moe_layers={len(moe_stats)}{cmi_log}"
             )
 
             save_sys = system.module if hasattr(system, "module") else system

@@ -50,6 +50,7 @@ from .lightning_condition_diffusion import (
     LightningDiffusionSystem,
 )
 from .moe_ffn import (
+    CrossModalSparseMoEFFN,
     patch_ffn_with_moe_selective,
     collect_moe_aux_loss,
     init_cross_modal_vil_proj,
@@ -142,8 +143,12 @@ class LightningDiffusionMoESystem(LightningDiffusionSystem):
         vil_cond_dim: int = 128,
         cross_modal_router_type: str = "concat",
         moe_shared_expert: bool = False,
+        cmi_routing: bool = False,
         **kwargs,
     ):
+        if cmi_routing and (not cross_modal_routing or cross_modal_router_type != "gated"):
+            raise ValueError("CMI routing requires cross_modal_routing=True and router_type='gated'")
+        self.cmi_routing = cmi_routing
         # Always use the cuboid backbone; MoE patches are applied afterwards
         kwargs["denoiser_backbone"] = "cuboid"
         super().__init__(*args, **kwargs)
@@ -221,6 +226,18 @@ class LightningDiffusionMoESystem(LightningDiffusionSystem):
         # Inject into all CrossModalSparseMoEFFN layers
         # All MoE layers at Level 0 share the same 48x48 resolution
         inject_vil_cond(self.denoiser, vil_full)
+        if self.cmi_routing:
+            permutation = None
+            batch_size = vil_full.shape[0]
+            if self.training and batch_size > 1:
+                # A random nonzero cyclic shift has no self-matches. Each
+                # example donates its entire sequence to the same recipient
+                # in every layer, including during checkpoint recomputation.
+                shift = torch.randint(1, batch_size, (), device=vil_full.device)
+                permutation = (torch.arange(batch_size, device=vil_full.device) + shift) % batch_size
+            for layer in self.denoiser.modules():
+                if isinstance(layer, CrossModalSparseMoEFFN):
+                    layer._cmi_permutation = permutation
 
     # ------------------------------------------------------------------
     # Override forward_from_encoded to inject VIL before denoiser call
@@ -253,3 +270,11 @@ class LightningDiffusionMoESystem(LightningDiffusionSystem):
         every SparseMoEFFN layer in the denoiser.
         """
         return collect_moe_aux_loss(self.denoiser)
+
+    def collect_cmi_routing_loss(self) -> torch.Tensor:
+        """Mean negative JSD across layers (independent of layer count)."""
+        losses = [
+            layer._cmi_loss_for_bp for layer in self.denoiser.modules()
+            if isinstance(layer, CrossModalSparseMoEFFN) and layer._cmi_loss_for_bp is not None
+        ]
+        return torch.stack(losses).mean() if losses else next(self.denoiser.parameters()).new_zeros(())
