@@ -141,9 +141,9 @@ moe_params:
   vil_cond_dim: 128
   cross_modal_router_type: "gated"
   # CMI-inspired routing: mean negative JSD over tokens and MoE layers.
-  # Weight ramps from 0.002 to 0.01 during the first five epochs.
+  # Weight ramps from 0.0002 to 0.001 during the first five epochs.
   # Set cmi_weight to 0 to recover the ordinary gated training objective.
-  cmi_weight: 0.01
+  cmi_weight: 0.001
   cmi_warmup_epochs: 5
 
 # ── Precomputed VIL latents ─────────────────────────────────
