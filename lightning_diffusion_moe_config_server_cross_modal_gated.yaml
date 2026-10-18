@@ -37,7 +37,7 @@ test_params:
   micro_batch_size: 4
   num_workers: 0
   probabilistic_samples: 8   # 8 ensemble members — matches baseline
-  euler_steps: 10            # 10 ODE steps — matches baseline
+  euler_steps: 4            # 10 ODE steps — matches baseline
   probability_threshold: 0.2 # default threshold for CSI reporting
 
 # ── Training ────────────────────────────────────────────────
