@@ -7,4 +7,4 @@ logs/
 __pycache__/
 *.py[cod]
 .env
-/visualizations/20261022_192311_25915483.pbs101/
+/visualizations/outputs/
